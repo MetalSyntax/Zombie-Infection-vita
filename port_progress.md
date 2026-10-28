@@ -329,3 +329,138 @@ render-to-texture no se tocan. La proyección del juego se restaura después de 
 inmediato de `add rX, rX, #255` (0x53e60, 0x52158, 0x521b0; se valida el opcode original antes de
 parchear) a 3 (~1%). **L + R** los muestra/oculta (mientras ambos están apretados no esquivan ni
 atacan).
+
+## 2026-10-27 — Corrida 7 (log_007): menú de pausa con Start y Select
+
+**Problema:** Tras 17 minutos de juego in-game en hardware real, al pulsar Start o Select no se abría el menú de pausa / opciones / inventario.
+
+**Causa raíz desensamblando el binario Mach-O:**
+1. En `CHudManager`, el botón de pausa in-game es el `VirtualButton` almacenado en el offset `+0x38` (56 en decimal), que tiene `button_id == 6`.
+2. Al tocarlo, emite `EvVirtualButton(id=6, state=0)`, el cual es recibido por `COnFootCombatControlHandler::onEvent` y llama a `CLevel::SetPause()`. Al frame siguiente, `GS3DStuff::update` detecta `CLevel::IsPaused()` y empuja la escena `GSIngamePause`.
+3. Sin embargo, en `patch.c`, `hud_map` tenía `SCE_CTRL_START` mapeado erróneamente a `{0x3c, 0x2c}` (los botones de "Back" / enfundar arma de `CHudManager::getBackButtonID()`), en lugar de `{0x38}`.
+4. Además, Select estaba consumido en exclusividad para calibrar sensibilidad de cámara (`SELECT + ↑/↓`).
+
+**Fix (`source/patch.c`):**
+1. Mapeo de `SCE_CTRL_START` corregido en `hud_map` al offset real del botón de pausa: `{0x38}`.
+2. Pulsar / soltar Select de forma individual (tap sin flechas ↑/↓) ahora sintetiza la pulsación de `SCE_CTRL_START`, permitiendo abrir el menú tanto con Start como con Select. Si se mantiene pulsado Select junto con ↑/↓, se ajusta la sensibilidad de cámara normalmente sin pausar.
+3. Al estar en pausa (`is_paused`), pulsar Start o soltar Select invoca directamente `CLevel::SetResume()`, permitiendo reanudar la partida sin necesidad de tocar la pantalla táctil.
+4. Corrección de linkeo con vitasdk moderno en `CMakeLists.txt` agregando `-Wl,--no-warn-mismatch` para compatibilidad de ABI softfp con librerías del SDK.
+
+## 2026-10-28 — Corrida 8 (log_010 + psp2core-1793145679): crash START/SELECT, controles, HUD 0% y reproductor de video
+
+**Problema 1 (Crash en log_010):**
+Al pulsar START / SELECT en menús o inicio de partida, la consola arrojaba un Data abort en `0x98032de8` (`PlayerTest::isCarryingVaccineTank`).
+
+**Causa raíz diagnosticada con psvita-toolkit analyze:**
+1. En `patch.c`, existía un fallback que llamaba a `CLevel::SetPause(level)` cuando `!hud`. Al estar en la pantalla de título o menús iniciales, `hud` era NULL pero `level` ya estaba instanciado, por lo que presionar Start marcaba `is_paused = 1`.
+2. Al pulsar Start de nuevo (o intentar reanudar), se invocaba `CLevel::SetResume()`.
+3. `CLevel::SetResume()` llama a `Map::removeFullScreenMap()`, el cual invoca `CHudManager::hideFullMap()`.
+4. `CHudManager::hideFullMap()` llama a `CControlManager::GetPlayerObj()`, el cual devuelve NULL porque en los menús no existe ningún objeto `PlayerTest`.
+5. Inmediatamente después, `CHudManager::hideFullMap()` llama a `PlayerTest::isCarryingVaccineTank(player)` sin validar si es NULL.
+6. `PlayerTest::isCarryingVaccineTank` ejecuta `ldr r0, [r0, #0x7e0]`, produciendo Data abort por dereferenciar `0x0 + 0x7e0`.
+
+**Fix del crash (`source/patch.c`):**
+1. Eliminado el fallback erróneo `c_level_set_pause(level)` cuando `!hud`: fuera del gameplay el motor no debe ser pausado.
+2. Hook implementado con `macho_hook` en `PlayerTest::isCarryingVaccineTank` (`__ZN10PlayerTest21isCarryingVaccineTankEv`): si `player == NULL`, retorna 0 de forma segura.
+
+**Problema 2 (Mapeo de botones Triangle y L):**
+1. **△ (Triangle):** reconfigurado en `hud_map` a `{0x2c, 0x3c, 0x64}` para enfundar las armas (`PlayerTest::unDrawWeapon`), con fallback a salto si no se tienen armas desenfundadas.
+2. **L (Trigger izquierdo):** reconfigurado para recargar arma tocando el HUD de arma/munición en la esquina superior derecha (`MultiElement` en offset `+0x98`), complementado con invocación directa a `MultiElement::ReloadBullets()` en `patch_input`.
+
+**Problema 3 (Opacidad de botones de HUD):**
+`HUD_ALPHA_HIDDEN` se ajustó de 3 (~1%) a 0 (0% de opacidad). De este modo, los botones virtuales de pantalla (incluyendo botón táctil de menú y botiquín) quedan 100% invisibles en el gameplay para una interfaz limpia, conservando el atajo **L + R** para alternar visibilidad total.
+
+**Problema 4 (Glitches gráficos en cinemáticas in-engine):**
+Recompilación limpia de `vendor/vitaGL` con `GENERIC_STACK_DEPTH 16` (antes 2), permitiendo anidamiento profundo de matrices de textura y proyección en `LibEffects` y `wide_begin` sin desbordamiento de pila.
+
+**Problema 5 (Reproducción de video .m4v):**
+Implementado subsistema completo en `source/video.c` y enlazado en `source/uikit.c`:
+1. Demuxer MP4/M4V ISO-BMFF para extraer las pistas H.264 y AAC de las cinemáticas (`cinematic_02_lab.m4v`, `cinematic_03_fin.m4v`).
+2. Decodificación de video H.264 acelerada por hardware de PS Vita (`SceVideodec` / `sceAvcdec`) renderizada directo a memoria CDRAM de vitaGL en textura 16:9 letterboxed.
+3. Decodificación de audio AAC mediante FFmpeg (`libavcodec` / `swresample` / `libavutil`) con streaming en hilo dedicado sobre `SceAudioOut`.
+4. Salto de cinemática con Cross, Circle o Start.
+5. `source/uikit.c` intercepta `MPMoviePlayerController initWithContentURL:` y `play`, reproduciendo el video antes de disparar la notificación `MPMoviePlayerPlaybackDidFinishNotification`.
+
+## 2026-10-28 — Corrida 9 (log_012 + psp2core-1793197449): crash transición de zona / cinemáticas en vitaGL
+
+**Problema (Crash en log_012 tras ~22 minutos de juego):**
+Al cambiar de zona donde iniciaba una cinemática/escena, el juego crasheaba con Data abort exception (`0x30004`) en hilo `PSVZI0001`:
+- `PC: 0xe000cd86` (`SceLibKernel` `memcpy + 0x16`).
+- `LR: 0x81043b89` (`reload_ffp_shaders` en `vendor/vitaGL/source/ffp.c:947`).
+- `R0: 0x862f8bc8`, `R1: 0x00000000` (puntero fuente NULL), `R2: 0x862fa223` (tamaño), `R5/R10: 0x201800ef` (`frag_shader_mask`).
+
+**Causa raíz diagnosticada con psvita-toolkit analyze:**
+1. `vendor/vitaGL/source/ffp.c` invocaba `shark_compile_shader_extended` tanto para shaders de vértices como de fragmentos, pero **no verificaba si el resultado `t` era NULL**.
+2. Inmediatamente llamaba a `vgl_fast_memcpy((void *)ffp_fragment_program, (void *)t, size)`, produciendo la excepción fatal en `memcpy` al desreferenciar `R1 = 0x0`.
+3. Además, en `source/gles.c`: `vglInitExtended(0, SCR_W, SCR_H, 8 * 1024 * 1024, ...)` reservaba únicamente 8 MB para el heap del sistema/newlib (`malloc`). Al transicionar de zona tras 22 min de partida continua y cargar nuevos modelos, bancos de audio y streaming de cinemáticas, el espacio libre para `malloc` y los allocators de `vitaShaRK` (`libshacccg`) se agotaba, causando que la compilación devolviera NULL.
+
+**Fix implementado:**
+1. **Robustez y control de errores en `vendor/vitaGL/source/ffp.c`:**
+   - Se añadieron verificaciones `if (t)` tanto para `SHARK_VERTEX_SHADER` como para `SHARK_FRAGMENT_SHADER`.
+   - En caso de fallo de compilación, se extraen e imprimen los diagnósticos del compilador con `shark_get_internal_compile_output()`.
+   - Se previene la copia nula (`memcpy`) y el registro de programas corruptos con `sceGxmShaderPatcherRegisterProgram`.
+   - Se realiza fallback automático al último shader válido registrado en la caché de RAM (`frag_shader_cache` / `vert_shader_cache`).
+2. **Aumento de memoria para transiciones en `source/gles.c`:**
+   - `ram_threshold` en `vglInitExtended` ampliado de 8 MB a 32 MB (`32 * 1024 * 1024`), cuatriplicando el heap de newlib para la carga fluida de assets, audio y cinemáticas entre zonas.
+3. Recompilación limpia de `vendor/vitaGL` (`libvitaGL.a`) y regeneración de `eboot.bin` y `zombieinfection.vpk`.
+
+## 2026-10-28 — Corrida 10 (log_013): resolución de videos .m4v, eliminación de glitches gráficos y caída de FPS
+
+**Problemas reportados:**
+1. Los videos `.m4v` no se reproducían.
+2. Caída drástica de FPS en la nueva zona.
+3. Glitches gráficos y geometría distorsionada en cinemáticas in-engine.
+
+**Diagnóstico y causas raíz:**
+1. **Detección de videos .m4v (`source/objc.c`):**
+   - `CLevel::GetCinematicName()` pasa a `MoviePlayer initWithFile:andFlipped:` el nombre sin extensión (`cinematic_02_lab`).
+   - `MoviePlayer` llama a `[NSBundle pathForResource:name ofType:nil inDirectory:@""]`.
+   - Al ser `type == nil`, `bundle_path` buscaba únicamente la ruta exacta sin extensión (`.../cinematic_02_lab`), la cual no existe en disco (`cinematic_02_lab.m4v`).
+   - Al devolver NULL, `MoviePlayer` abortaba la creación de `MPMoviePlayerController` y retornaba `nil`, impidiendo que el reproductor de video se activara.
+2. **Glitches gráficos por flags de compilación en vitaGL (`CMakeLists.txt`):**
+   - `DRAW_SPEEDHACK=2`: saltaba la copia a ring buffer de la GPU para draws grandes, leyendo directamente de la memoria cliente del CPU que el motor actualiza dinámicamente, produciendo desgarros y geometría distorsionada.
+   - `SAMPLERS_SPEEDHACK=1`: omitía resolución rigurosa de texturas/samplers en shaders, produciendo distorsión de texturas.
+3. **Caída de FPS por saturación de I/O a disco (`source/darwin.c`, `source/log.c`, `source/uikit.c`):**
+   - Al cargar la nueva zona, el motor sondea miles de variantes de archivos ausentes (`.tga`, `.bmp`, `.gif`, `.pvr`).
+   - `d_fopen` llamaba a `l_debug` en cada intento fallido y `log.c` ejecutaba `fflush(log_file)` de forma síncrona a la tarjeta de memoria en cada línea, congelando la CPU.
+   - `app_set_orientation` registraba a 60 Hz el estado de la barra de orientación en el log.
+4. **Reserva de memoria para SceAvcdec (`source/gles.c`):**
+   - `vglInitExtended` dejaba 0 bytes de umbral en CDRAM y PHYCONT.
+   - Migrado a `vglInitWithCustomThreshold` reservando 16 MB de CDRAM y 8 MB de PHYCONT para los buffers del decodificador de video por hardware (`alloc_phycont`).
+
+**Fix implementado:**
+1. `bundle_path` en `source/objc.c` sondea automáticamente extensiones comunes (`.m4v`, `.mp4`, `.png`, `.tga`, `.pvr`) si `type` es nulo o el archivo base no existe.
+2. Eliminados `DRAW_SPEEDHACK=2` y `SAMPLERS_SPEEDHACK=1` de `CMakeLists.txt`; recompilación limpia de `vendor/vitaGL`.
+3. En `source/darwin.c`: `d_fopen` solo registra aperturas de archivo exitosas (`f != NULL`).
+4. En `source/log.c`: `fflush` deshabilitado para mensajes `DEBUG`.
+5. En `source/uikit.c`: `app_set_orientation` solo registra cuando la orientación cambia.
+6. En `source/gles.c`: `vglInitWithCustomThreshold` asigna 32 MB RAM, 16 MB CDRAM y 8 MB PHYCONT.
+7. Build generado limpio: `eboot.bin` y `zombieinfection.vpk`.
+
+## 2026-10-28 — Corrida 11 (log_014): corrección de caída a 6 FPS (parcheo de vertex shaders) y clarificación de cinemáticas
+
+**Diagnóstico de los 6 FPS y estado de videos:**
+1. **Causa real de la caída a 6 FPS en la nueva zona (`vendor/vitaGL/source/ffp.c`):**
+   - En la nueva zona se activa la segunda unidad de textura (`GL_TEXTURE1`, `mask.num_textures == 2`).
+   - En `ffp.c`, la configuración compacta estática de atributos solo se usaba cuando `mask.num_textures == 1 && mask.lights_num == 0`.
+   - Al ser `mask.num_textures == 2`, caía en la rama `else` (modo no inmediato), la cual llamaba incondicionalmente a `patch_vertex_program` (`sceGxmShaderPatcherCreateVertexProgram`) en **cada draw call** debido a que `ffp_dirty_vert_attr` se ensuciaba con `glVertexPointer`.
+   - Invocar al patcher de shaders de GXM cientos de veces por frame destruía el rendimiento, bajando a 6 FPS.
+2. **Doble buffering vs Triple buffering (`source/gles.c`):**
+   - Con `vglUseTripleBuffering(GL_FALSE)`, cualquier frame que tardara >16.6 ms bloqueaba la CPU y GPU esperando el VSync.
+3. **Cinemática de inicio ("intro video"):**
+   - El IPA de iOS 1.0.0 contiene únicamente dos videos `.m4v`: `cinematic_02_lab.m4v` (final del laboratorio) y `cinematic_03_fin.m4v` (final del juego).
+   - La introducción del juego (bote llegando al muelle, diálogo de Shaw y su compañera) es una **cinemática 3D in-engine renderizada en tiempo real** por el motor (`ScriptManager::isInCinematic()`), no un archivo de video pre-renderizado. Al correr a 6 FPS por el cuello de botella de shaders, parecía una reproducción fallida.
+
+**Fix implementado:**
+1. **Caché de Vertex Programs parcheados (`vendor/vitaGL/source/ffp.c`):**
+   - Se implementó `patched_vprog_cache` (64 entradas) que guarda en memoria los programas ya parcheados para la tupla `(id, attrs, streams, num_params, index_type)`.
+   - Si los atributos y el shader no han cambiado su estructura (mismo formato, componentes y strides), se reutiliza el programa ya compilado en 0 ms sin invocar `sceGxmShaderPatcherCreateVertexProgram`.
+   - Se normalizó el empaquetado de atributos en la rama no inmediata para que `streamIndex`, `regIndex`, y `indexSource` sean 100% deterministas.
+2. **Triple Buffering activado (`source/gles.c`):**
+   - Se activó `vglUseTripleBuffering(GL_TRUE)` eliminando los bloqueos por VBlank en swaps de pantalla.
+3. **Atajo de depuración para probar el reproductor de video (`source/patch.c`):**
+   - Se agregó el combo de botones `L1 + R1 + TRIÁNGULO` para invocar directamente `video_play("ux0:data/zombieinfection/ZombieInfection.app/cinematic_02_lab.m4v")` en cualquier momento.
+4. Build verificado con `psvita-toolkit build`: `eboot.bin` y `zombieinfection.vpk` generados correctamente.
+
+> [!WARNING]
+> **Issue Abierto**: El usuario reporta que persiste la caída a ~6 FPS en zonas específicas. Queda registrado como issue prioritario para investigar perfilado de CPU/GPU, conversión de vertex arrays de cliente (`prepare_draw`), conteo de draw calls y temporizadores en `uikit.c`.

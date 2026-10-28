@@ -938,14 +938,28 @@ HM(b_executable_path) { return RET_ID(ns_string(BUNDLE_PATH "ZombieInfection"));
 // pathForResource:ofType:(inDirectory:): nil when the file is missing, like NSBundle.
 static id bundle_path(const char *dir, id name, id type) {
     char p[512];
+    const char *n = name ? ns_cstr(name) : "";
     const char *ext = type ? ns_cstr(type) : "";
-    snprintf(p, sizeof(p), BUNDLE_PATH "%s%s%s%s%s", dir, dir[0] ? "/" : "", ns_cstr(name), ext[0] ? "." : "", ext);
+    if (!dir) dir = "";
+    snprintf(p, sizeof(p), BUNDLE_PATH "%s%s%s%s%s", dir, dir[0] ? "/" : "", n, ext[0] ? "." : "", ext);
     SceIoStat st;
-    if (sceIoGetstat(p, &st) < 0) {
-        l_debug("pathForResource: %s missing", p);
-        return NULL;
+    if (sceIoGetstat(p, &st) >= 0)
+        return ns_string(p);
+
+    // If file was not found directly and no extension was specified, probe common extensions (.m4v, .mp4, etc.)
+    if (!ext[0] && n[0]) {
+        static const char *try_exts[] = {"m4v", "mp4", "png", "tga", "pvr", "jpg"};
+        for (size_t i = 0; i < sizeof(try_exts) / sizeof(try_exts[0]); i++) {
+            snprintf(p, sizeof(p), BUNDLE_PATH "%s%s%s.%s", dir, dir[0] ? "/" : "", n, try_exts[i]);
+            if (sceIoGetstat(p, &st) >= 0) {
+                l_info("pathForResource: found '%s.%s'", n, try_exts[i]);
+                return ns_string(p);
+            }
+        }
     }
-    return ns_string(p);
+
+    l_debug("pathForResource: %s missing", p);
+    return NULL;
 }
 HM(b_path_for) { return RET_ID(bundle_path("", (id)a, (id)b)); }
 HM(b_path_for_dir) { return RET_ID(bundle_path(c ? ns_cstr((id)c) : "", (id)a, (id)b)); }

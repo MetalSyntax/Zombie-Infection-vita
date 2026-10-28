@@ -17,6 +17,7 @@
 #include "log.h"
 #include "macho.h"
 #include "patch.h"
+#include "video.h"
 
 // Game-specific import tables for the port being developed.
 // Register any guest binary symbols you wish to intercept or replace here.
@@ -26,13 +27,29 @@ const import_entry patch_imports[] = {
 };
 const int patch_imports_count = sizeof(patch_imports) / sizeof(patch_imports[0]);
 
+// Hook for PlayerTest::isCarryingVaccineTank: returns 0 if player is NULL instead of crashing.
+static int hooked_isCarryingVaccineTank(void *player) {
+    if (!player)
+        return 0;
+    return *(uint32_t *)((uint8_t *)player + 0x7e0) != 0;
+}
+
 void patch_init(void) {
     l_info("Initializing game-specific patches...");
-    // Place macho_hook(...) calls here to redirect internal guest functions
+    macho_hook("__ZN10PlayerTest21isCarryingVaccineTankEv", hooked_isCarryingVaccineTank);
 }
 
 void patch_frame(void) {
-    // Per-frame logic if required by target engine
+    static uint32_t last_buttons = 0;
+    // Debug shortcut: L1 + R1 + TRIANGLE triggers cutscene video test
+    if ((pad.buttons & (SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_TRIANGLE)) ==
+        (SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_TRIANGLE)) {
+        if (!(last_buttons & SCE_CTRL_TRIANGLE)) {
+            l_info("Debug combo: playing cutscene cinematic_02_lab.m4v");
+            video_play("ux0:data/zombieinfection/ZombieInfection.app/cinematic_02_lab.m4v");
+        }
+    }
+    last_buttons = pad.buttons;
 }
 
 // ---------------------------------------------------------------- physical controls
@@ -52,10 +69,10 @@ static const struct {
     {SCE_CTRL_CROSS | SCE_CTRL_RTRIGGER, {0x74, 0x1c, 0x84, 0x80}}, // attack
     {SCE_CTRL_SQUARE, {0x20}},                                      // second attack
     {SCE_CTRL_CIRCLE, {0x24, 0x28, 0x30, 0x34}},                    // use / context action
-    {SCE_CTRL_TRIANGLE, {0x64}},                                    // jump
-    {SCE_CTRL_LTRIGGER, {0x60}},                                    // dodge
+    {SCE_CTRL_TRIANGLE, {0x2c, 0x3c, 0x64}},                        // hide guns (holster: Back / unDrawWeapon) or jump
+    {SCE_CTRL_LTRIGGER, {0x98}},                                    // reload weapon (touch gun near map)
     {SCE_CTRL_UP, {0x78}},                                          // rotate
-    {SCE_CTRL_START, {0x3c, 0x2c}},                                 // back / pause
+    {SCE_CTRL_START, {0x38}},                                       // pause menu
     {SCE_CTRL_DOWN, {0x2c, 0x3c}},                                  // holster (Back -> PlayerTest::unDrawWeapon)
 };
 #define HUD_STICK 0x18
@@ -229,7 +246,7 @@ void patch_overlay(void) {
 
 // ---------------------------------------------------------------- HUD opacity (L + R)
 
-// The touch controls are drawn at ~1% opacity (physical buttons drive them); L + R toggles them
+// The touch controls are drawn at ~0% opacity (physical buttons drive them); L + R toggles them
 // fully visible. VirtualButton::draw and AnalogStick::draw pass a constant alpha of 255 to
 // ASprite::PaintFrame (`add rX, rX, #255`); that immediate is rewritten in the guest code.
 static const struct {
@@ -239,7 +256,7 @@ static const struct {
     {0x00052158, 0xE28CC0FF}, // AnalogStick::draw (base)
     {0x000521b0, 0xE28330FF}, // AnalogStick::draw (knob)
 };
-#define HUD_ALPHA_HIDDEN 3 // ~1% of 255
+#define HUD_ALPHA_HIDDEN 0 // 0% opacity (clean screen, hidden)
 static int hud_visible = -1, alpha_ok;
 
 static void hud_set_visible(int on) {
@@ -287,15 +304,64 @@ void patch_input(void) {
         pad.buttons &= ~LR;
     }
     // SELECT + Up/Down: camera sensitivity (those buttons do nothing else while SELECT is held).
+    // Tapping SELECT alone toggles the pause menu (same as START).
+    static int select_cam_used;
+    if (pressed & SCE_CTRL_SELECT)
+        select_cam_used = 0;
     if (now & SCE_CTRL_SELECT) {
-        if (pressed & SCE_CTRL_UP)
+        if (pressed & SCE_CTRL_UP) {
             cam_adjust(+1);
-        if (pressed & SCE_CTRL_DOWN)
+            select_cam_used = 1;
+        }
+        if (pressed & SCE_CTRL_DOWN) {
             cam_adjust(-1);
-        pad.buttons &= ~(SCE_CTRL_UP | SCE_CTRL_DOWN);
+            select_cam_used = 1;
+        }
+        pad.buttons &= ~(SCE_CTRL_UP | SCE_CTRL_DOWN | SCE_CTRL_SELECT);
+    }
+    if ((prev & SCE_CTRL_SELECT) && !(now & SCE_CTRL_SELECT)) {
+        if (!select_cam_used)
+            pad.buttons |= SCE_CTRL_START;
     }
 
+    static void *(*c_level_get_instance)(void);
+    static int (*c_level_is_paused)(void *level);
+    static void (*c_level_set_resume)(void *level);
+    static int c_level_funcs_loaded;
+    if (!c_level_funcs_loaded) {
+        c_level_get_instance = (void *(*)(void))macho_sym("__ZN6CLevel11GetInstanceEv");
+        c_level_is_paused = (int (*)(void *))macho_sym("__ZN6CLevel8IsPausedEv");
+        c_level_set_resume = (void (*)(void *))macho_sym("__ZN6CLevel9SetResumeEv");
+        c_level_funcs_loaded = 1;
+    }
+
+    void *level = c_level_get_instance ? c_level_get_instance() : NULL;
+    int is_paused = (level && c_level_is_paused) ? c_level_is_paused(level) : 0;
+
+    int trigger_pause_toggle = (pressed & SCE_CTRL_START) ||
+                               (((prev & SCE_CTRL_SELECT) && !(now & SCE_CTRL_SELECT)) && !select_cam_used);
+
     uint8_t *hud = hud_manager();
+    if (trigger_pause_toggle && is_paused) {
+        if (c_level_set_resume) {
+            l_info("Resume game requested via START/SELECT");
+            c_level_set_resume(level);
+        }
+    }
+
+    // L button: reload weapon
+    if (pressed & SCE_CTRL_LTRIGGER) {
+        if (hud) {
+            void *multi = *(void **)(hud + 0x98);
+            if (multi) {
+                static void (*reload_bullets)(void *);
+                if (!reload_bullets)
+                    reload_bullets = (void (*)(void *))macho_sym("__ZN12MultiElement13ReloadBulletsEv");
+                if (reload_bullets)
+                    reload_bullets(multi);
+            }
+        }
+    }
     hud_rect r;
     if (hud) {
         for (unsigned i = 0; i < sizeof(hud_map) / sizeof(hud_map[0]); i++) {

@@ -269,6 +269,28 @@ SceGxmProgram *ffp_fragment_program = NULL;
 SceGxmProgram *ffp_vertex_program = NULL;
 SceGxmVertexProgram *ffp_vertex_program_patched; // Patched vertex program for the fixed function pipeline implementation
 SceGxmFragmentProgram *ffp_fragment_program_patched; // Patched fragment program for the fixed function pipeline implementation
+
+#define PATCHED_VPROG_CACHE_SIZE 64
+typedef struct {
+	SceGxmShaderPatcherId id;
+	uint8_t num_params;
+	SceGxmIndexSource index_type;
+	SceGxmVertexAttribute attrs[FFP_VERTEX_ATTRIBS_NUM];
+	SceGxmVertexStream streams[FFP_VERTEX_ATTRIBS_NUM];
+	SceGxmVertexProgram *prog;
+} patched_vprog_cache_entry;
+
+static patched_vprog_cache_entry patched_vprog_cache[PATCHED_VPROG_CACHE_SIZE];
+static int patched_vprog_cache_count = 0;
+
+static void invalidate_patched_vprog_cache(SceGxmShaderPatcherId id) {
+	for (int i = 0; i < patched_vprog_cache_count; i++) {
+		if (patched_vprog_cache[i].id == id) {
+			patched_vprog_cache[i] = patched_vprog_cache[--patched_vprog_cache_count];
+			i--;
+		}
+	}
+}
 GLboolean ffp_dirty_frag = GL_TRUE;
 GLboolean ffp_dirty_vert = GL_TRUE;
 uint16_t ffp_dirty_vert_attr = 0xFFFF;
@@ -662,36 +684,61 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
 			sprintf(vshader, ffp_vert_src, mask.clip_planes_num, mask.num_textures, mask.has_colors, mask.lights_num, mask.shading_mode, mask.normalize, mask.fixed_mask, mask.pos_fixed_mask, WVP_ON_GPU, mask.fast_perspective_correction);
 			uint32_t size = strlen(vshader);
 			SceGxmProgram *t = shark_compile_shader_extended(vshader, &size, SHARK_VERTEX_SHADER, compiler_opts, compiler_fastmath, compiler_fastprecision, compiler_fastint);
-			ffp_vertex_program = (SceGxmProgram *)vglMalloc(size);
-			vgl_fast_memcpy((void *)ffp_vertex_program, (void *)t, size);
-			shark_clear_output();
+			if (t) {
+				ffp_vertex_program = (SceGxmProgram *)vglMalloc(size);
+				vgl_fast_memcpy((void *)ffp_vertex_program, (void *)t, size);
+				shark_clear_output();
 				
-			// Saving compiled shader in filesystem cache
-			f = sceIoOpen(fname, SCE_O_WRONLY | SCE_O_TRUNC | SCE_O_CREAT, 0777);
-			sceIoWrite(f, ffp_vertex_program, size);
-			sceIoClose(f);
+				// Saving compiled shader in filesystem cache
+				f = sceIoOpen(fname, SCE_O_WRONLY | SCE_O_TRUNC | SCE_O_CREAT, 0777);
+				if (f >= 0) {
+					sceIoWrite(f, ffp_vertex_program, size);
+					sceIoClose(f);
+				}
+			} else {
+#ifdef LOG_ERRORS
+				vgl_log("%s:%d %s: Failed to compile vertex shader (mask: 0x%08X).\n", __FILE__, __LINE__, __func__, vert_shader_mask);
+#endif
+				printf("[vitaGL FFP ERROR] Failed to compile vertex shader (mask: 0x%08X)\n", vert_shader_mask);
+				const SceShaccCgCompileOutput *out = shark_get_internal_compile_output();
+				if (out) {
+					for (int d = 0; d < out->diagnosticCount; d++) {
+						printf("  [vitaShaRK] %s\n", out->diagnostics[d].message);
+					}
+				}
+				shark_clear_output();
+				if (vert_shader_cache_size > 0 && vert_shader_cache_idx >= 0) {
+					ffp_vertex_program = vert_shader_cache[vert_shader_cache_idx].prog;
+					ffp_vertex_program_id = vert_shader_cache[vert_shader_cache_idx].id;
+					ffp_vertex_unif_buf = vert_shader_cache[vert_shader_cache_idx].unif_buf;
+					ffp_vertex_unif_buf_size = vert_shader_cache[vert_shader_cache_idx].unif_buf_size;
+				}
+			}
 		}
-		sceGxmShaderPatcherRegisterProgram(gxm_shader_patcher, ffp_vertex_program, &ffp_vertex_program_id);
-		ffp_vertex_unif_buf_size = sceGxmProgramGetDefaultUniformBufferSize(ffp_vertex_program);
-		ffp_vertex_unif_buf = vglMalloc(ffp_vertex_unif_buf_size);
+		if (ffp_vertex_program && (!vert_shader_cache_size || vert_shader_cache[vert_shader_cache_idx].prog != ffp_vertex_program)) {
+			sceGxmShaderPatcherRegisterProgram(gxm_shader_patcher, ffp_vertex_program, &ffp_vertex_program_id);
+			ffp_vertex_unif_buf_size = sceGxmProgramGetDefaultUniformBufferSize(ffp_vertex_program);
+			ffp_vertex_unif_buf = vglMalloc(ffp_vertex_unif_buf_size);
 
-		// Adding new shader to RAM cache
-		vert_shader_cache_idx = (vert_shader_cache_idx + 1) % SHADER_CACHE_SIZE;
-		if (vert_shader_cache_size < SHADER_CACHE_SIZE) {
-			vert_shader_cache_size++;
-		} else {
-			sceGxmShaderPatcherForceUnregisterProgram(gxm_shader_patcher, vert_shader_cache[vert_shader_cache_idx].id);
-			vgl_free(vert_shader_cache[vert_shader_cache_idx].prog);
-			vgl_free(vert_shader_cache[vert_shader_cache_idx].unif_buf);
+			// Adding new shader to RAM cache
+			vert_shader_cache_idx = (vert_shader_cache_idx + 1) % SHADER_CACHE_SIZE;
+			if (vert_shader_cache_size < SHADER_CACHE_SIZE) {
+				vert_shader_cache_size++;
+			} else {
+				invalidate_patched_vprog_cache(vert_shader_cache[vert_shader_cache_idx].id);
+				sceGxmShaderPatcherForceUnregisterProgram(gxm_shader_patcher, vert_shader_cache[vert_shader_cache_idx].id);
+				vgl_free(vert_shader_cache[vert_shader_cache_idx].prog);
+				vgl_free(vert_shader_cache[vert_shader_cache_idx].unif_buf);
+			}
+			vert_shader_cache[vert_shader_cache_idx].mask.raw = vert_shader_mask;
+			vert_shader_cache[vert_shader_cache_idx].prog = ffp_vertex_program;
+			vert_shader_cache[vert_shader_cache_idx].id = ffp_vertex_program_id;
+			vert_shader_cache[vert_shader_cache_idx].unif_buf_size = ffp_vertex_unif_buf_size;
+			vert_shader_cache[vert_shader_cache_idx].unif_buf = ffp_vertex_unif_buf;
+
+			// Reload existing uniform references
+			reload_vertex_uniforms_and_attributes(vert_shader_cache[vert_shader_cache_idx].vert_unifs, vert_shader_cache[vert_shader_cache_idx].attributes);
 		}
-		vert_shader_cache[vert_shader_cache_idx].mask.raw = vert_shader_mask;
-		vert_shader_cache[vert_shader_cache_idx].prog = ffp_vertex_program;
-		vert_shader_cache[vert_shader_cache_idx].id = ffp_vertex_program_id;
-		vert_shader_cache[vert_shader_cache_idx].unif_buf_size = ffp_vertex_unif_buf_size;
-		vert_shader_cache[vert_shader_cache_idx].unif_buf = ffp_vertex_unif_buf;
-
-		// Reload existing uniform references
-		reload_vertex_uniforms_and_attributes(vert_shader_cache[vert_shader_cache_idx].vert_unifs, vert_shader_cache[vert_shader_cache_idx].attributes);
 
 		// Clearing dirty flags
 		ffp_dirty_vert = GL_FALSE;
@@ -744,23 +791,19 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
 			ffp_vertex_num_params = 1;
 			
 			// Vertex positions
-			if (ffp_dirty_vert_attr & (1 << FFP_ATTRIB_POSITION)) {
-				vgl_fast_memcpy(&ffp_vertex_attribute[0], &ffp_vertex_attrib_config[FFP_ATTRIB_POSITION], sizeof(SceGxmVertexAttribute));
-				ffp_vertex_attribute[0].streamIndex = 0;
-				ffp_vertex_attribute[0].regIndex = ffp_vertex_attribs[FFP_ATTRIB_POSITION];
-				ffp_vertex_stream[0].stride = ffp_vertex_stream_config[FFP_ATTRIB_POSITION].stride;
-				ffp_vertex_stream[0].indexSource = SCE_GXM_INDEX_SOURCE_INDEX_16BIT;
-			}
+			vgl_fast_memcpy(&ffp_vertex_attribute[0], &ffp_vertex_attrib_config[FFP_ATTRIB_POSITION], sizeof(SceGxmVertexAttribute));
+			ffp_vertex_attribute[0].streamIndex = 0;
+			ffp_vertex_attribute[0].regIndex = ffp_vertex_attribs[FFP_ATTRIB_POSITION];
+			ffp_vertex_stream[0].stride = ffp_vertex_stream_config[FFP_ATTRIB_POSITION].stride;
+			ffp_vertex_stream[0].indexSource = index_type;
 
 			// Vertex texture coordinates (First pass)
 			if (mask.num_textures > 0) {
-				if (ffp_dirty_vert_attr & (1 << FFP_ATTRIB_TEX0)) {
-					vgl_fast_memcpy(&ffp_vertex_attribute[1], &ffp_vertex_attrib_config[FFP_ATTRIB_TEX(base_texture_id)], sizeof(SceGxmVertexAttribute));
-					ffp_vertex_attribute[1].streamIndex = 1;
-					ffp_vertex_attribute[1].regIndex = ffp_vertex_attribs[FFP_ATTRIB_TEX0];
-					ffp_vertex_stream[1].stride = ffp_vertex_stream_config[FFP_ATTRIB_TEX(base_texture_id)].stride;
-					ffp_vertex_stream[1].indexSource = SCE_GXM_INDEX_SOURCE_INDEX_16BIT;
-				}
+				vgl_fast_memcpy(&ffp_vertex_attribute[1], &ffp_vertex_attrib_config[FFP_ATTRIB_TEX(base_texture_id)], sizeof(SceGxmVertexAttribute));
+				ffp_vertex_attribute[1].streamIndex = 1;
+				ffp_vertex_attribute[1].regIndex = ffp_vertex_attribs[FFP_ATTRIB_TEX0];
+				ffp_vertex_stream[1].stride = ffp_vertex_stream_config[FFP_ATTRIB_TEX(base_texture_id)].stride;
+				ffp_vertex_stream[1].indexSource = index_type;
 				ffp_vertex_num_params++;
 			}
 
@@ -768,67 +811,55 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
 				ffp_lighting_streams = &ffp_vertex_stream[ffp_vertex_num_params];
 
 				// Lighting equation attributes
-				if (ffp_dirty_vert_attr & (1 << FFP_ATTRIB_COLOR)) {
-					setup_lighting_attributes(GL_AMBIENT, GL_AMBIENT_AND_DIFFUSE, FFP_ATTRIB_COLOR);
-					setup_lighting_attributes(GL_DIFFUSE, GL_AMBIENT_AND_DIFFUSE, FFP_ATTRIB_DIFFUSE);
-					setup_lighting_attributes(GL_SPECULAR, GL_SPECULAR, FFP_ATTRIB_SPECULAR);
-					setup_lighting_attributes(GL_EMISSION, GL_EMISSION, FFP_ATTRIB_EMISSION);
-				} else {
-					ffp_vertex_num_params += 4;
-				}
+				setup_lighting_attributes(GL_AMBIENT, GL_AMBIENT_AND_DIFFUSE, FFP_ATTRIB_COLOR);
+				setup_lighting_attributes(GL_DIFFUSE, GL_AMBIENT_AND_DIFFUSE, FFP_ATTRIB_DIFFUSE);
+				setup_lighting_attributes(GL_SPECULAR, GL_SPECULAR, FFP_ATTRIB_SPECULAR);
+				setup_lighting_attributes(GL_EMISSION, GL_EMISSION, FFP_ATTRIB_EMISSION);
 			
-				if (ffp_dirty_vert_attr & (1 << FFP_ATTRIB_NORMAL)) {
-					if (ffp_vertex_attrib_state & (1 << FFP_ATTRIB_NORMAL)) {
-						vgl_fast_memcpy(&ffp_vertex_attribute[ffp_vertex_num_params], &ffp_vertex_attrib_config[FFP_ATTRIB_NORMAL], sizeof(SceGxmVertexAttribute));
-						ffp_vertex_attribute[ffp_vertex_num_params].streamIndex = ffp_vertex_num_params;
-						ffp_vertex_attribute[ffp_vertex_num_params].regIndex = ffp_vertex_attribs[FFP_ATTRIB_NORMAL];
-						ffp_vertex_stream[ffp_vertex_num_params].stride = ffp_vertex_stream_config[FFP_ATTRIB_NORMAL].stride;
-					} else {
-						ffp_vertex_attribute[ffp_vertex_num_params].streamIndex = ffp_vertex_num_params;
-						ffp_vertex_attribute[ffp_vertex_num_params].regIndex = ffp_vertex_attribs[FFP_ATTRIB_NORMAL];
-						ffp_vertex_attribute[ffp_vertex_num_params].format = SCE_GXM_ATTRIBUTE_FORMAT_F32;
-						ffp_vertex_attribute[ffp_vertex_num_params].offset = 0;
-						ffp_vertex_attribute[ffp_vertex_num_params].componentCount = 3;
-						ffp_vertex_stream[ffp_vertex_num_params].stride = 0;
-					}
-					ffp_vertex_stream[ffp_vertex_num_params].indexSource = SCE_GXM_INDEX_SOURCE_INDEX_16BIT;
+				if (ffp_vertex_attrib_state & (1 << FFP_ATTRIB_NORMAL)) {
+					vgl_fast_memcpy(&ffp_vertex_attribute[ffp_vertex_num_params], &ffp_vertex_attrib_config[FFP_ATTRIB_NORMAL], sizeof(SceGxmVertexAttribute));
+					ffp_vertex_attribute[ffp_vertex_num_params].streamIndex = ffp_vertex_num_params;
+					ffp_vertex_attribute[ffp_vertex_num_params].regIndex = ffp_vertex_attribs[FFP_ATTRIB_NORMAL];
+					ffp_vertex_stream[ffp_vertex_num_params].stride = ffp_vertex_stream_config[FFP_ATTRIB_NORMAL].stride;
+				} else {
+					ffp_vertex_attribute[ffp_vertex_num_params].streamIndex = ffp_vertex_num_params;
+					ffp_vertex_attribute[ffp_vertex_num_params].regIndex = ffp_vertex_attribs[FFP_ATTRIB_NORMAL];
+					ffp_vertex_attribute[ffp_vertex_num_params].format = SCE_GXM_ATTRIBUTE_FORMAT_F32;
+					ffp_vertex_attribute[ffp_vertex_num_params].offset = 0;
+					ffp_vertex_attribute[ffp_vertex_num_params].componentCount = 3;
+					ffp_vertex_stream[ffp_vertex_num_params].stride = 0;
 				}
+				ffp_vertex_stream[ffp_vertex_num_params].indexSource = index_type;
 				ffp_vertex_num_params++;
 			} else {
 				ffp_lighting_streams = NULL;
 				if (mask.has_colors) {
-					if (ffp_dirty_vert_attr & (1 << FFP_ATTRIB_COLOR)) {
-						// Vertex colors
-						vgl_fast_memcpy(&ffp_vertex_attribute[ffp_vertex_num_params], &ffp_vertex_attrib_config[FFP_ATTRIB_COLOR], sizeof(SceGxmVertexAttribute));
-						ffp_vertex_attribute[ffp_vertex_num_params].streamIndex = ffp_vertex_num_params;
-						ffp_vertex_attribute[ffp_vertex_num_params].regIndex = ffp_vertex_attribs[FFP_ATTRIB_COLOR];
-						ffp_vertex_stream[ffp_vertex_num_params].stride = ffp_vertex_stream_config[FFP_ATTRIB_COLOR].stride;
-						ffp_vertex_stream[ffp_vertex_num_params].indexSource = SCE_GXM_INDEX_SOURCE_INDEX_16BIT;
-						ffp_vertex_num_params++;
-					}
+					// Vertex colors
+					vgl_fast_memcpy(&ffp_vertex_attribute[ffp_vertex_num_params], &ffp_vertex_attrib_config[FFP_ATTRIB_COLOR], sizeof(SceGxmVertexAttribute));
+					ffp_vertex_attribute[ffp_vertex_num_params].streamIndex = ffp_vertex_num_params;
+					ffp_vertex_attribute[ffp_vertex_num_params].regIndex = ffp_vertex_attribs[FFP_ATTRIB_COLOR];
+					ffp_vertex_stream[ffp_vertex_num_params].stride = ffp_vertex_stream_config[FFP_ATTRIB_COLOR].stride;
+					ffp_vertex_stream[ffp_vertex_num_params].indexSource = index_type;
+					ffp_vertex_num_params++;
 				}
 			}
 
 			// Vertex texture coordinates (Second pass)
 			if (mask.num_textures > 1) {
-				if (ffp_dirty_vert_attr & (1 << FFP_ATTRIB_TEX1)) {
-					vgl_fast_memcpy(&ffp_vertex_attribute[ffp_vertex_num_params], &ffp_vertex_attrib_config[FFP_ATTRIB_TEX(base_texture_id + 1)], sizeof(SceGxmVertexAttribute));
-					ffp_vertex_attribute[ffp_vertex_num_params].streamIndex = ffp_vertex_num_params;
-					ffp_vertex_attribute[ffp_vertex_num_params].regIndex = ffp_vertex_attribs[FFP_ATTRIB_TEX1];
-					ffp_vertex_stream[ffp_vertex_num_params].stride = ffp_vertex_stream_config[FFP_ATTRIB_TEX(base_texture_id + 1)].stride;
-					ffp_vertex_stream[ffp_vertex_num_params].indexSource = SCE_GXM_INDEX_SOURCE_INDEX_16BIT;
-				}
+				vgl_fast_memcpy(&ffp_vertex_attribute[ffp_vertex_num_params], &ffp_vertex_attrib_config[FFP_ATTRIB_TEX(base_texture_id + 1)], sizeof(SceGxmVertexAttribute));
+				ffp_vertex_attribute[ffp_vertex_num_params].streamIndex = ffp_vertex_num_params;
+				ffp_vertex_attribute[ffp_vertex_num_params].regIndex = ffp_vertex_attribs[FFP_ATTRIB_TEX1];
+				ffp_vertex_stream[ffp_vertex_num_params].stride = ffp_vertex_stream_config[FFP_ATTRIB_TEX(base_texture_id + 1)].stride;
+				ffp_vertex_stream[ffp_vertex_num_params].indexSource = index_type;
 				ffp_vertex_num_params++;
 #ifdef HAVE_HIGH_FFP_TEXUNITS
 				// Vertex texture coordinates (Third pass)
 				if (mask.num_textures > 2) {
-					if (ffp_dirty_vert_attr & (1 << FFP_ATTRIB_COLOR)) {
-						vgl_fast_memcpy(&ffp_vertex_attribute[ffp_vertex_num_params], &ffp_vertex_attrib_config[FFP_ATTRIB_TEX(base_texture_id + 2)], sizeof(SceGxmVertexAttribute));
-						ffp_vertex_attribute[ffp_vertex_num_params].streamIndex = ffp_vertex_num_params;
-						ffp_vertex_attribute[ffp_vertex_num_params].regIndex = ffp_vertex_attribs[FFP_ATTRIB_TEX1];
-						ffp_vertex_stream[ffp_vertex_num_params].stride = ffp_vertex_stream_config[FFP_ATTRIB_TEX(base_texture_id + 2)].stride;
-						ffp_vertex_stream[ffp_vertex_num_params].indexSource = SCE_GXM_INDEX_SOURCE_INDEX_16BIT;
-					}
+					vgl_fast_memcpy(&ffp_vertex_attribute[ffp_vertex_num_params], &ffp_vertex_attrib_config[FFP_ATTRIB_TEX(base_texture_id + 2)], sizeof(SceGxmVertexAttribute));
+					ffp_vertex_attribute[ffp_vertex_num_params].streamIndex = ffp_vertex_num_params;
+					ffp_vertex_attribute[ffp_vertex_num_params].regIndex = ffp_vertex_attribs[FFP_ATTRIB_TEX1];
+					ffp_vertex_stream[ffp_vertex_num_params].stride = ffp_vertex_stream_config[FFP_ATTRIB_TEX(base_texture_id + 2)].stride;
+					ffp_vertex_stream[ffp_vertex_num_params].indexSource = index_type;
 					ffp_vertex_num_params++;
 				}
 #endif
@@ -838,14 +869,40 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
 		}
 		ffp_dirty_vert_attr = 0;
 		
-		// Creating patched vertex shader
-		patch_vertex_program(gxm_shader_patcher, ffp_vertex_program_id, attrs, ffp_vertex_num_params, streams, ffp_vertex_num_params, &ffp_vertex_program_patched);
-		
 #ifndef INDICES_SPEEDHACK
 		for (int i = 0; i < ffp_vertex_num_params; i++) {
 			streams[i].indexSource = index_type;
 		}
 #endif
+
+		// Check if we already have this exact patched vertex program in cache
+		SceGxmVertexProgram *cached_vprog = NULL;
+		for (int c = 0; c < patched_vprog_cache_count; c++) {
+			if (patched_vprog_cache[c].id == ffp_vertex_program_id &&
+			    patched_vprog_cache[c].num_params == ffp_vertex_num_params &&
+			    patched_vprog_cache[c].index_type == index_type &&
+			    memcmp(patched_vprog_cache[c].attrs, attrs, ffp_vertex_num_params * sizeof(SceGxmVertexAttribute)) == 0 &&
+			    memcmp(patched_vprog_cache[c].streams, streams, ffp_vertex_num_params * sizeof(SceGxmVertexStream)) == 0) {
+				cached_vprog = patched_vprog_cache[c].prog;
+				break;
+			}
+		}
+
+		if (cached_vprog) {
+			ffp_vertex_program_patched = cached_vprog;
+		} else {
+			// Creating patched vertex shader
+			patch_vertex_program(gxm_shader_patcher, ffp_vertex_program_id, attrs, ffp_vertex_num_params, streams, ffp_vertex_num_params, &ffp_vertex_program_patched);
+			if (patched_vprog_cache_count < PATCHED_VPROG_CACHE_SIZE) {
+				int idx = patched_vprog_cache_count++;
+				patched_vprog_cache[idx].id = ffp_vertex_program_id;
+				patched_vprog_cache[idx].num_params = ffp_vertex_num_params;
+				patched_vprog_cache[idx].index_type = index_type;
+				memcpy(patched_vprog_cache[idx].attrs, attrs, ffp_vertex_num_params * sizeof(SceGxmVertexAttribute));
+				memcpy(patched_vprog_cache[idx].streams, streams, ffp_vertex_num_params * sizeof(SceGxmVertexStream));
+				patched_vprog_cache[idx].prog = ffp_vertex_program_patched;
+			}
+		}
 	}
 
 	// Checking if fragment shader requires a recompilation
@@ -942,50 +999,74 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
 #endif
 			uint32_t size = strlen(fshader);
 			SceGxmProgram *t = shark_compile_shader_extended(fshader, &size, SHARK_FRAGMENT_SHADER, compiler_opts, compiler_fastmath, compiler_fastprecision, compiler_fastint);
-			ffp_fragment_program = (SceGxmProgram *)vglMalloc(size);
-			vgl_fast_memcpy((void *)ffp_fragment_program, (void *)t, size);
-			shark_clear_output();
+			if (t) {
+				ffp_fragment_program = (SceGxmProgram *)vglMalloc(size);
+				vgl_fast_memcpy((void *)ffp_fragment_program, (void *)t, size);
+				shark_clear_output();
 
-			// Saving compiled shader in filesystem cache
-			f = sceIoOpen(fname, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
-			sceIoWrite(f, ffp_fragment_program, size);
-			sceIoClose(f);
-		}
-		sceGxmShaderPatcherRegisterProgram(gxm_shader_patcher, ffp_fragment_program, &ffp_fragment_program_id);
-		ffp_fragment_unif_buf_size = sceGxmProgramGetDefaultUniformBufferSize(ffp_fragment_program);
-		if (ffp_fragment_unif_buf_size) {
-			ffp_fragment_unif_buf = vglMalloc(ffp_fragment_unif_buf_size);
-		} else {
-			ffp_fragment_unif_buf = NULL;
-		}
-		
-		// Adding new shader to RAM cache
-		frag_shader_cache_idx = (frag_shader_cache_idx + 1) % SHADER_CACHE_SIZE;
-		if (frag_shader_cache_size < SHADER_CACHE_SIZE) {
-			frag_shader_cache_size++;
-		} else {
-			sceGxmShaderPatcherForceUnregisterProgram(gxm_shader_patcher, frag_shader_cache[frag_shader_cache_idx].id);
-			vgl_free(frag_shader_cache[frag_shader_cache_idx].prog);
-			if (frag_shader_cache[frag_shader_cache_idx].unif_buf) {
-				vgl_free(frag_shader_cache[frag_shader_cache_idx].unif_buf);
+				// Saving compiled shader in filesystem cache
+				f = sceIoOpen(fname, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
+				if (f >= 0) {
+					sceIoWrite(f, ffp_fragment_program, size);
+					sceIoClose(f);
+				}
+			} else {
+#ifdef LOG_ERRORS
+				vgl_log("%s:%d %s: Failed to compile fragment shader (mask: 0x%08X).\n", __FILE__, __LINE__, __func__, frag_shader_mask);
+#endif
+				printf("[vitaGL FFP ERROR] Failed to compile fragment shader (mask: 0x%08X)!\n", frag_shader_mask);
+				const SceShaccCgCompileOutput *out = shark_get_internal_compile_output();
+				if (out) {
+					for (int d = 0; d < out->diagnosticCount; d++) {
+						printf("  [vitaShaRK] %s\n", out->diagnostics[d].message);
+					}
+				}
+				shark_clear_output();
+				if (frag_shader_cache_size > 0 && frag_shader_cache_idx >= 0) {
+					ffp_fragment_program = frag_shader_cache[frag_shader_cache_idx].prog;
+					ffp_fragment_program_id = frag_shader_cache[frag_shader_cache_idx].id;
+					ffp_fragment_unif_buf = frag_shader_cache[frag_shader_cache_idx].unif_buf;
+					ffp_fragment_unif_buf_size = frag_shader_cache[frag_shader_cache_idx].unif_buf_size;
+				}
 			}
 		}
-		frag_shader_cache[frag_shader_cache_idx].mask.raw = frag_shader_mask;
+		if (ffp_fragment_program && (!frag_shader_cache_size || frag_shader_cache[frag_shader_cache_idx].prog != ffp_fragment_program)) {
+			sceGxmShaderPatcherRegisterProgram(gxm_shader_patcher, ffp_fragment_program, &ffp_fragment_program_id);
+			ffp_fragment_unif_buf_size = sceGxmProgramGetDefaultUniformBufferSize(ffp_fragment_program);
+			if (ffp_fragment_unif_buf_size) {
+				ffp_fragment_unif_buf = vglMalloc(ffp_fragment_unif_buf_size);
+			} else {
+				ffp_fragment_unif_buf = NULL;
+			}
+			
+			// Adding new shader to RAM cache
+			frag_shader_cache_idx = (frag_shader_cache_idx + 1) % SHADER_CACHE_SIZE;
+			if (frag_shader_cache_size < SHADER_CACHE_SIZE) {
+				frag_shader_cache_size++;
+			} else {
+				sceGxmShaderPatcherForceUnregisterProgram(gxm_shader_patcher, frag_shader_cache[frag_shader_cache_idx].id);
+				vgl_free(frag_shader_cache[frag_shader_cache_idx].prog);
+				if (frag_shader_cache[frag_shader_cache_idx].unif_buf) {
+					vgl_free(frag_shader_cache[frag_shader_cache_idx].unif_buf);
+				}
+			}
+			frag_shader_cache[frag_shader_cache_idx].mask.raw = frag_shader_mask;
 #ifndef DISABLE_TEXTURE_COMBINER
 #ifdef HAVE_HIGH_FFP_TEXUNITS
-		frag_shader_cache[frag_shader_cache_idx].cmb_mask.raw_low = cmb_mask.raw_low;
-		frag_shader_cache[frag_shader_cache_idx].cmb_mask.raw_high = cmb_mask.raw_high;
+			frag_shader_cache[frag_shader_cache_idx].cmb_mask.raw_low = cmb_mask.raw_low;
+			frag_shader_cache[frag_shader_cache_idx].cmb_mask.raw_high = cmb_mask.raw_high;
 #else
-		frag_shader_cache[frag_shader_cache_idx].cmb_mask.raw = cmb_mask.raw;
+			frag_shader_cache[frag_shader_cache_idx].cmb_mask.raw = cmb_mask.raw;
 #endif
 #endif
-		frag_shader_cache[frag_shader_cache_idx].prog = ffp_fragment_program;
-		frag_shader_cache[frag_shader_cache_idx].id = ffp_fragment_program_id;
-		frag_shader_cache[frag_shader_cache_idx].unif_buf_size = ffp_fragment_unif_buf_size;
-		frag_shader_cache[frag_shader_cache_idx].unif_buf = ffp_fragment_unif_buf;
+			frag_shader_cache[frag_shader_cache_idx].prog = ffp_fragment_program;
+			frag_shader_cache[frag_shader_cache_idx].id = ffp_fragment_program_id;
+			frag_shader_cache[frag_shader_cache_idx].unif_buf_size = ffp_fragment_unif_buf_size;
+			frag_shader_cache[frag_shader_cache_idx].unif_buf = ffp_fragment_unif_buf;
 
-		// Reload existing uniform references
-		reload_fragment_uniforms(frag_shader_cache[frag_shader_cache_idx].frag_unifs);
+			// Reload existing uniform references
+			reload_fragment_uniforms(frag_shader_cache[frag_shader_cache_idx].frag_unifs);
+		}
 
 		// Clearing dirty flags
 		ffp_dirty_frag = GL_FALSE;

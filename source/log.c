@@ -34,7 +34,8 @@ static void log_v(const char *level, const char *fmt, va_list ap) {
     printf("[%s] [%s] %s\n", time_str, level, buf);
     if (log_file) {
         fprintf(log_file, "[%s] [%s] %s\n", time_str, level, buf);
-        fflush(log_file);
+        if (strcmp(level, "DEBUG") != 0)
+            fflush(log_file);
     }
 }
 

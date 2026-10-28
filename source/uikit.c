@@ -24,6 +24,8 @@
 #include "objc.h"
 #include "objc_rt.h"
 #include "patch.h"
+#include "darwin.h"
+#include "video.h"
 
 #define VIEW_W 320.0f
 #define VIEW_H 480.0f
@@ -164,8 +166,10 @@ HM(app_set_delegate) {
     return 0;
 }
 HM(app_set_orientation) {
-    status_orientation = a;
-    l_info("UIApplication: status bar orientation %u", a);
+    if (status_orientation != a) {
+        status_orientation = a;
+        l_info("UIApplication: status bar orientation %u", a);
+    }
     return 0;
 }
 HM(app_orientation) { return status_orientation; }
@@ -447,14 +451,27 @@ HM(color_any) { return RET_ID(color_obj ? color_obj : (color_obj = objc_alloc((o
 
 // ---------------------------------------------------------------- MediaPlayer
 
-// Cinematics are skipped: preload and "playback finished" are reported right away.
-// ponytail: no video playback; upgrade to SceAvPlayer (H.264 .m4v plays natively) for cinematics.
+static char g_movie_path[512];
+
 HM(movie_init_url) {
-    l_info("MPMoviePlayerController: %s (skipped)", ns_cstr((id)a));
+    const char *url = ns_cstr((id)a);
+    if (url) {
+        if (!strncmp(url, "file://", 7))
+            url += 7;
+        darwin_path(url, g_movie_path, sizeof(g_movie_path));
+        l_info("MPMoviePlayerController: init url '%s' -> '%s'", url, g_movie_path);
+    } else {
+        g_movie_path[0] = '\0';
+    }
     defer_notification("MPMoviePlayerContentPreloadDidFinishNotification", self);
     return RET_ID(self);
 }
 HM(movie_play) {
+    if (g_movie_path[0]) {
+        l_info("MPMoviePlayerController: play '%s'", g_movie_path);
+        video_play(g_movie_path);
+        g_movie_path[0] = '\0';
+    }
     defer_notification("MPMoviePlayerPlaybackDidFinishNotification", self);
     return 0;
 }

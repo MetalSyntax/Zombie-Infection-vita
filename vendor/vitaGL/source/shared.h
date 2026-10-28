@@ -39,7 +39,7 @@
 #define VERTEX_ATTRIBS_NUM 16 // Available vertex attributes
 #define UBOS_NUM 14 // Available uniform buffers bindings
 #define MODELVIEW_STACK_DEPTH 32 // Depth of modelview matrix stack
-#define GENERIC_STACK_DEPTH 2 // Depth of generic matrix stack
+#define GENERIC_STACK_DEPTH 16 // Depth of generic matrix stack
 #define DISPLAY_WIDTH_DEF 960 // Default display width in pixels
 #define DISPLAY_HEIGHT_DEF 544 // Default display height in pixels
 #define DISPLAY_MAX_BUFFER_COUNT 5 // Maximum amount of display buffers to use

@@ -74,23 +74,23 @@ This software does NOT contain original game code, binaries, copyrighted graphic
 | **Cross (✖) / R** | Attack | ✅ Working |
 | **Square (◼)** | Secondary attack | ✅ Working |
 | **Circle (●)** | Use / contextual action | ✅ Working |
-| **Triangle (▲)** | Jump | ✅ Working |
+| **Triangle (▲)** | Holster (hide guns) / jump | ✅ Working |
 | **D-Pad Up** | Rotate | ✅ Working |
-| **D-Pad Down** | Holster / draw weapon | ✅ Working |
-| **L Trigger** | Dodge | ✅ Working |
-| **Start** | Back / Pause | ✅ Working |
+| **D-Pad Down** | Holster / unDraw weapon | ✅ Working |
+| **L Trigger** | Reload weapon | ✅ Working |
+| **Start / Select** | Pause menu / Resume | ✅ Working |
 | **L + R (held)** | Show / hide the on-screen touch controls | ✅ Working |
 | **Select + D-Pad ↑/↓** | Camera sensitivity (1–10, saved) | ✅ Working |
 
 > [!TIP]
-> The touch controls sit at ~1% opacity by default because the physical buttons drive them; hold **L + R** to make them fully visible.
+> The touch controls are hidden (0% opacity) by default because physical buttons drive them; hold **L + R** to toggle them fully visible.
 
 ---
 
 ## Known Issues
 
-- **Videos skipped**: the intro and other `.m4v` cutscenes are currently skipped.
-- **Occasional graphics glitches**: some distorted geometry/textures can appear during in-engine cutscenes; improved but not fully resolved.
+- **Severe FPS drop (~6 FPS) in specific zones**: Certain areas and in-engine cutscenes (such as the park/helicopter area) suffer from severe framerate drops to ~6 FPS (under active investigation).
+- **In-engine intro cutscene**: The game opening is an in-engine real-time 3D cutscene rendered by the engine (not a pre-rendered video file) and is affected by the framerate drop. Hardware H.264 video playback is implemented for the actual `.m4v` files (`cinematic_02_lab.m4v` and `cinematic_03_fin.m4v`).
 - **Online features disabled**: store, networking and anti-piracy checks are bypassed by design.
 - **Crash dumps** are written by the system to `ux0:data/` (not to the game folder).
 

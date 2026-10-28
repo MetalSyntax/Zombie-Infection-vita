@@ -25,7 +25,7 @@ endif()
 
 ## vitaGL vendorizada con compilación en softfp (OBLIGATORIO para evitar pantalla negra en PS Vita)
 set(VITAGL_VENDOR_DIR ${CMAKE_CURRENT_SOURCE_DIR}/vendor/vitaGL)
-set(VITAGL_MAKE_FLAGS_STR "SOFTFP_ABI=1 NO_DEBUG=1 HAVE_SHADER_CACHE=1 NO_SPLASHSCREEN=1 HAVE_GLSL_UBOS=1 SAMPLERS_SPEEDHACK=1 DRAW_SPEEDHACK=2")
+set(VITAGL_MAKE_FLAGS_STR "SOFTFP_ABI=1 NO_DEBUG=1 HAVE_SHADER_CACHE=1 NO_SPLASHSCREEN=1 HAVE_GLSL_UBOS=1")
 separate_arguments(VITAGL_MAKE_FLAGS UNIX_COMMAND "${VITAGL_MAKE_FLAGS_STR}")
 include(ExternalProject)
 ExternalProject_Add(
@@ -50,6 +50,7 @@ include_directories(
 # cualquier llamada a/desde el juego lo podría corromper.
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-q -O2 -g -ffixed-r9 -mfloat-abi=softfp -DSKIP_SPLASHSCREEN -Wall -Wno-unused-function -D_GNU_SOURCE")
 set(CMAKE_ASM_FLAGS "${CMAKE_ASM_FLAGS} -ffixed-r9 -mfloat-abi=softfp")
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--no-warn-mismatch")
 
 add_executable(${CMAKE_PROJECT_NAME}
   source/main.c
@@ -68,6 +69,7 @@ add_executable(${CMAKE_PROJECT_NAME}
   source/patch.c
   source/cxx.c
   source/uikit.c
+  source/video.c
 )
 
 target_link_libraries(${CMAKE_PROJECT_NAME}
@@ -99,6 +101,14 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
   SceAudio_stub
   SceAudioIn_stub
   SceAvPlayer_stub
+  SceVideodec_stub
+  -Wl,--start-group
+  avcodec
+  swresample
+  avutil
+  mp3lame
+  m
+  -Wl,--end-group
   SceIofilemgr_stub
   SceIme_stub
 )

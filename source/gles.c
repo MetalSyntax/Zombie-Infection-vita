@@ -24,6 +24,9 @@
 #define FB_H 480
 #define SCR_W 960
 #define SCR_H 544
+#ifndef SCE_KERNEL_MAX_MAIN_CDIALOG_MEM_SIZE
+#define SCE_KERNEL_MAX_MAIN_CDIALOG_MEM_SIZE 0x8C6000
+#endif
 // Fullscreen without stretching: the 480x320 game would fill 816x544 at the Vita's height.
 // Drawing into the window framebuffer compresses clip space along the screen-horizontal axis by
 // WIDE_K (= 816/960) and the blit then fills all 960 px: the 3D view gains field of view on both
@@ -446,8 +449,9 @@ static void g_glNoop(void) {}
 // ---------------------------------------------------------------- init / present
 
 void gles_init(void) {
-    vglUseTripleBuffering(GL_FALSE);
-    vglInitExtended(0, SCR_W, SCR_H, 8 * 1024 * 1024, SCE_GXM_MULTISAMPLE_NONE);
+    vglUseTripleBuffering(GL_TRUE);
+    vglInitWithCustomThreshold(0, SCR_W, SCR_H, 32 * 1024 * 1024, 16 * 1024 * 1024, 8 * 1024 * 1024,
+                               SCE_KERNEL_MAX_MAIN_CDIALOG_MEM_SIZE, SCE_GXM_MULTISAMPLE_NONE);
     glGenTextures(1, &fbo_tex);
     glBindTexture(GL_TEXTURE_2D, fbo_tex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, FB_W, FB_H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);

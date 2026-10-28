@@ -74,7 +74,8 @@ const char *darwin_path(const char *in, char *out, size_t outlen) {
 static FILE *d_fopen(const char *path, const char *mode) {
     char p[512];
     FILE *f = fopen(darwin_path(path, p, sizeof(p)), mode);
-    l_debug("fopen(%s, %s) -> %p", p, mode, f);
+    if (f)
+        l_debug("fopen(%s, %s) -> %p", p, mode, f);
     return f;
 }
 
