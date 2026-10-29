@@ -69,11 +69,13 @@ static const struct {
     {SCE_CTRL_CROSS | SCE_CTRL_RTRIGGER, {0x74, 0x1c, 0x84, 0x80}}, // attack
     {SCE_CTRL_SQUARE, {0x20}},                                      // second attack
     {SCE_CTRL_CIRCLE, {0x24, 0x28, 0x30, 0x34}},                    // use / context action
-    {SCE_CTRL_TRIANGLE, {0x2c, 0x3c, 0x64}},                        // hide guns (holster: Back / unDrawWeapon) or jump
-    {SCE_CTRL_LTRIGGER, {0x98}},                                    // reload weapon (touch gun near map)
+    {SCE_CTRL_TRIANGLE, {0x64}},                                    // jump
+    {SCE_CTRL_LTRIGGER, {0x60, 0x98}},                              // dodge (fallback: reload)
     {SCE_CTRL_UP, {0x78}},                                          // rotate
-    {SCE_CTRL_START, {0x38}},                                       // pause menu
     {SCE_CTRL_DOWN, {0x2c, 0x3c}},                                  // holster (Back -> PlayerTest::unDrawWeapon)
+    {SCE_CTRL_LEFT, {0x68}},                                        // heal (use medikit)
+    {SCE_CTRL_RIGHT, {0x98}},                                       // reload weapon
+    {SCE_CTRL_START, {0x38, 0x3c, 0x2c}},                           // pause menu / back
 };
 #define HUD_STICK 0x18
 
@@ -342,6 +344,7 @@ void patch_input(void) {
                                (((prev & SCE_CTRL_SELECT) && !(now & SCE_CTRL_SELECT)) && !select_cam_used);
 
     uint8_t *hud = hud_manager();
+    hud_rect r;
     if (trigger_pause_toggle && is_paused) {
         if (c_level_set_resume) {
             l_info("Resume game requested via START/SELECT");
@@ -349,8 +352,8 @@ void patch_input(void) {
         }
     }
 
-    // L button: reload weapon
-    if (pressed & SCE_CTRL_LTRIGGER) {
+    // Reload weapon: D-Pad Right, or L button when not dodging
+    if ((pressed & SCE_CTRL_RIGHT) || ((pressed & SCE_CTRL_LTRIGGER) && (!hud || !hud_element(hud, 0x60, &r)))) {
         if (hud) {
             void *multi = *(void **)(hud + 0x98);
             if (multi) {
@@ -362,7 +365,6 @@ void patch_input(void) {
             }
         }
     }
-    hud_rect r;
     if (hud) {
         for (unsigned i = 0; i < sizeof(hud_map) / sizeof(hud_map[0]); i++) {
             if (!(pad.buttons & hud_map[i].buttons))

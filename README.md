@@ -29,8 +29,8 @@ The game boots, runs its C++ global constructors, initializes Irrlicht, reaches 
 - [x] **Text & Fonts**: in-game text uses Irrlicht bitmap fonts (`gll_font.pak`); UIKit text (`sizeWithFont:`/`drawAtPoint:`) is backed by FreeType.
 - [x] **Audio**: the game uses **OpenAL** (not RemoteIO), mapped to openal-soft on `sceAudioOut`; ADPCM is decoded by the game itself. AudioSession calls are stubbed.
 - [x] **Saves**: progress is written under `ux0:data/zombieinfection/saves/` (iOS `Documents/` is redirected and normalized).
-- [ ] **Videos**: `.m4v` cutscenes are currently skipped (next step: `SceAvPlayer`).
-- [ ] **Graphics polish**: occasional distorted geometry/textures during in-engine cutscenes are still under investigation.
+- [x] **Videos**: hardware-accelerated H.264 cutscene video playback (`SceVideodec` / `sceAvcdec`) with software AAC decoding via FFmpeg (`libavcodec`). Videos (`cinematic_02_lab.m4v` and `cinematic_03_fin.m4v`) play with audio and can be skipped with Cross (✖), Circle (●), or Start. *Verified on console.*
+- [x] **Graphics polish**: eliminated geometry tearing and texture artifacts by cleaning vitaGL compilation flags (no speedhack regressions), expanding generic matrix stack depth to 16, and activating a 64-entry patched vertex program cache.
 - [x] **Offline bypasses**: App Store, network and anti-piracy checks are gracefully bypassed.
 
 ---
@@ -74,10 +74,12 @@ This software does NOT contain original game code, binaries, copyrighted graphic
 | **Cross (✖) / R** | Attack | ✅ Working |
 | **Square (◼)** | Secondary attack | ✅ Working |
 | **Circle (●)** | Use / contextual action | ✅ Working |
-| **Triangle (▲)** | Holster (hide guns) / jump | ✅ Working |
-| **D-Pad Up** | Rotate | ✅ Working |
-| **D-Pad Down** | Holster / unDraw weapon | ✅ Working |
-| **L Trigger** | Reload weapon | ✅ Working |
+| **Triangle (▲)** | Jump | ✅ Working |
+| **D-Pad Up** | Rotate (180° quick turn) | ✅ Working |
+| **D-Pad Down** | Holster / unDraw weapon (guardar arma) | ✅ Working |
+| **D-Pad Left** | Heal (use medikit) | ✅ Working |
+| **D-Pad Right** | Reload weapon | ✅ Working |
+| **L Trigger** | Dodge (or reload if no dodge active) | ✅ Working |
 | **Start / Select** | Pause menu / Resume | ✅ Working |
 | **L + R (held)** | Show / hide the on-screen touch controls | ✅ Working |
 | **Select + D-Pad ↑/↓** | Camera sensitivity (1–10, saved) | ✅ Working |

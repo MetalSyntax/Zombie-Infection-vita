@@ -12,7 +12,7 @@ include("${VITASDK}/share/vita.cmake" REQUIRED)
 set(VITA_APP_NAME "Zombie Infection")
 set(VITA_TITLEID "PSVZI0001")
 set(VITA_VPKNAME "zombieinfection")
-set(VITA_VERSION "01.00")
+set(VITA_VERSION "01.10")
 set(VITA_MKSFOEX_FLAGS "-d ATTRIBUTE2=12")
 set(PSVITAIP "192.168.3.15" CACHE STRING "PSVita IP")
 
